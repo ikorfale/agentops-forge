@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.4.0] — 2026-03-03
+
+### Added
+- **`workflow` command** — typed multi-step agent workflow orchestrator
+  - Sequential step execution with configurable `stopOnFailure`
+  - Per-step SHA-256 receipt (hash of stepId + name + input + output)
+  - Provenance chain: ordered list of `stepId:receiptHash[:12]` for traceability
+  - Retry logic per step (`--retries N`) with configurable max attempts
+  - Rollback acknowledgement: when a step fails, all completed steps are marked for reversal
+  - Exported `parseStepSpec(spec)` for CLI step parsing
+- **11 new tests** covering guard (4) and workflow (7) commands — all green
+
+### Improved
+- **`guard` command** — now runs real pre-flight checks instead of always returning `passed: true`
+  - `guard --kind env` — checks `HOME`, `PATH`, `NODE_ENV` (required) + optional API keys
+  - `guard --kind files` — verifies `SOUL.md`, `MEMORY.md`, `TOOLS.md` presence in workspace
+  - `guard --kind network` — live DNS resolution of `api.anthropic.com` with 3s timeout
+  - `guard --kind schema` — schema validation stub (signals intent, extensible)
+  - Generic fallback for unknown kinds: single pass check
+  - Emits `errors[]` for every failed check; status is `ok|partial|fail`
+
 ## [Unreleased]
 
 ### Planned

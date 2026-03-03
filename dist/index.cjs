@@ -1,7 +1,9 @@
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -15,17 +17,29 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  dagCmd: () => dagCmd,
   discoverCmd: () => discoverCmd,
   guardCmd: () => guardCmd,
   handoffCmd: () => handoffCmd,
   outreachCmd: () => outreachCmd,
+  parseDagStepSpec: () => parseDagStepSpec,
+  parseStepSpec: () => parseStepSpec,
   receiptCmd: () => receiptCmd,
-  socialCmd: () => socialCmd
+  socialCmd: () => socialCmd,
+  workflowCmd: () => workflowCmd
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -68,10 +82,98 @@ Thesis -> Proof -> Challenge`;
 }
 
 // src/commands/guard.ts
+var import_node_fs = require("fs");
 async function guardCmd(kind) {
   const started = Date.now();
-  const checks = [{ name: kind, passed: true }];
-  return makeReport("guard", started, "ok", { checks });
+  const checks = [];
+  switch (kind) {
+    case "env": {
+      const requiredVars = ["HOME", "PATH", "NODE_ENV"];
+      for (const v of requiredVars) {
+        checks.push({
+          name: `env:${v}`,
+          passed: Boolean(process.env[v]),
+          detail: process.env[v] ? "set" : "missing"
+        });
+      }
+      const optionalVars = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SUPABASE_URL"];
+      for (const v of optionalVars) {
+        checks.push({
+          name: `env:${v} (optional)`,
+          passed: true,
+          // never fail on optional
+          detail: process.env[v] ? "set" : "not set (optional)"
+        });
+      }
+      break;
+    }
+    case "files": {
+      const agentFiles = [
+        process.env.HOME + "/.openclaw/workspace/SOUL.md",
+        process.env.HOME + "/.openclaw/workspace/MEMORY.md",
+        process.env.HOME + "/.openclaw/workspace/TOOLS.md"
+      ];
+      for (const f of agentFiles) {
+        const exists = (0, import_node_fs.existsSync)(f);
+        checks.push({
+          name: `file:${f.split("/").pop()}`,
+          passed: exists,
+          detail: exists ? "present" : "missing"
+        });
+      }
+      break;
+    }
+    case "network": {
+      try {
+        const { Resolver } = await import("dns/promises");
+        const resolver = new Resolver();
+        resolver.setServers(["8.8.8.8"]);
+        const addrs = await Promise.race([
+          resolver.resolve4("api.anthropic.com"),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3e3))
+        ]);
+        checks.push({
+          name: "dns:api.anthropic.com",
+          passed: Array.isArray(addrs) && addrs.length > 0,
+          detail: Array.isArray(addrs) ? `resolved: ${addrs[0]}` : "empty"
+        });
+      } catch (err) {
+        checks.push({
+          name: "dns:api.anthropic.com",
+          passed: false,
+          detail: err instanceof Error ? err.message : String(err)
+        });
+      }
+      break;
+    }
+    case "schema": {
+      checks.push({
+        name: "schema:zod",
+        passed: true,
+        detail: "schema validation is runtime-dependent; pass --schema <path> to enable"
+      });
+      break;
+    }
+    default: {
+      checks.push({
+        name: kind,
+        passed: true,
+        detail: "generic guard passed"
+      });
+    }
+  }
+  const passed = checks.filter((c) => c.passed).length;
+  const failed = checks.filter((c) => !c.passed).length;
+  const status = failed === 0 ? "ok" : passed === 0 ? "fail" : "partial";
+  const errors = checks.filter((c) => !c.passed).map((c) => `Guard check failed: ${c.name} \u2014 ${c.detail ?? "no detail"}`);
+  return makeReport(
+    "guard",
+    started,
+    status,
+    { kind, checks, passed, failed },
+    [],
+    errors
+  );
 }
 
 // src/commands/receipt.ts
@@ -88,12 +190,322 @@ async function handoffCmd(task, goal) {
   const packet = { task, goal, definition_of_done: "explicit", provenance: "required" };
   return makeReport("handoff", started, "ok", { score: 92, packet });
 }
+
+// src/commands/workflow.ts
+var import_node_crypto3 = require("crypto");
+async function defaultExecute(input) {
+  return { acknowledged: true, ...input };
+}
+function stepReceipt(stepId, stepName, input, output) {
+  const payload = JSON.stringify({ stepId, stepName, input, output });
+  return (0, import_node_crypto3.createHash)("sha256").update(payload).digest("hex");
+}
+async function runStepWithRetry(step, maxAttempts) {
+  const exec = step.execute ?? defaultExecute;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const output = await exec(step.input);
+      return { output, attempts: attempt };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { output: {}, attempts: maxAttempts, error: lastError };
+}
+async function workflowCmd(goal, steps, opts = {}) {
+  const started = Date.now();
+  const workflowId = (0, import_node_crypto3.randomUUID)();
+  const stopOnFailure = opts.stopOnFailure ?? true;
+  const results = [];
+  const provenanceChain = [];
+  let failedStep = null;
+  let rolledBack = false;
+  const warnings = [];
+  const errors = [];
+  for (const step of steps) {
+    if (failedStep !== null && stopOnFailure) {
+      results.push({
+        stepId: step.id,
+        stepName: step.name,
+        status: "skipped",
+        input: step.input,
+        output: {},
+        receiptHash: "",
+        attempts: 0,
+        durationMs: 0
+      });
+      continue;
+    }
+    const stepStart = Date.now();
+    const maxAttempts = (step.retries ?? 0) + 1;
+    const { output, attempts, error } = await runStepWithRetry(step, maxAttempts);
+    const durationMs = Date.now() - stepStart;
+    const status = error ? "failed" : "ok";
+    const receipt = status === "ok" ? stepReceipt(step.id, step.name, step.input, output) : "";
+    if (status === "ok") {
+      provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
+    }
+    results.push({
+      stepId: step.id,
+      stepName: step.name,
+      status,
+      input: step.input,
+      output,
+      receiptHash: receipt,
+      attempts,
+      durationMs,
+      error
+    });
+    if (status === "failed") {
+      failedStep = step.id;
+      errors.push(`Step ${step.id} (${step.name}) failed after ${attempts} attempt(s): ${error}`);
+      if (stopOnFailure) {
+        const completed = results.filter((r) => r.status === "ok");
+        for (const prev of completed.reverse()) {
+          warnings.push(`Rollback: step ${prev.stepId} (${prev.stepName}) marked for reversal`);
+        }
+        rolledBack = completed.length > 0;
+      }
+    }
+  }
+  const completedSteps = results.filter((r) => r.status === "ok").length;
+  const overallStatus = failedStep ? "fail" : completedSteps === steps.length ? "ok" : "partial";
+  return makeReport(
+    "workflow",
+    started,
+    overallStatus,
+    {
+      workflowId,
+      goal,
+      totalSteps: steps.length,
+      completedSteps,
+      failedStep,
+      rolledBack,
+      steps: results,
+      provenanceChain
+    },
+    warnings,
+    errors
+  );
+}
+function parseStepSpec(spec) {
+  const [id, ...rest] = spec.split(":");
+  return {
+    id: id.trim(),
+    name: rest.join(":").trim() || id.trim(),
+    input: {},
+    retries: 0
+  };
+}
+
+// src/commands/dag.ts
+var import_node_crypto4 = require("crypto");
+function stepReceipt2(stepId, stepName, input, output) {
+  const payload = JSON.stringify({ stepId, stepName, input, output });
+  return (0, import_node_crypto4.createHash)("sha256").update(payload).digest("hex");
+}
+async function defaultExecute2(dagInput) {
+  return { acknowledged: true, ...dagInput.staticInput };
+}
+async function runWithRetry(step, dagInput, maxAttempts) {
+  const exec = step.execute ?? defaultExecute2;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const output = await exec(dagInput);
+      return { output, attempts: attempt };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { output: {}, attempts: maxAttempts, error: lastError };
+}
+function topologicalBatches(steps) {
+  const idSet = new Set(steps.map((s) => s.id));
+  const inDegree = /* @__PURE__ */ new Map();
+  const children = /* @__PURE__ */ new Map();
+  for (const s of steps) {
+    inDegree.set(s.id, 0);
+    children.set(s.id, []);
+  }
+  for (const s of steps) {
+    for (const dep of s.dependsOn ?? []) {
+      if (!idSet.has(dep)) {
+        throw new Error(`Step "${s.id}" depends on unknown step "${dep}"`);
+      }
+      inDegree.set(s.id, (inDegree.get(s.id) ?? 0) + 1);
+      children.get(dep).push(s.id);
+    }
+  }
+  const batches = [];
+  const remaining = new Set(steps.map((s) => s.id));
+  const stepById = new Map(steps.map((s) => [s.id, s]));
+  while (remaining.size > 0) {
+    const ready = [...remaining].filter((id) => (inDegree.get(id) ?? 0) === 0);
+    if (ready.length === 0) {
+      throw new Error(`Cycle detected among steps: ${[...remaining].join(", ")}`);
+    }
+    batches.push(ready.map((id) => stepById.get(id)));
+    for (const id of ready) {
+      remaining.delete(id);
+      for (const child of children.get(id) ?? []) {
+        inDegree.set(child, (inDegree.get(child) ?? 0) - 1);
+      }
+    }
+  }
+  return batches;
+}
+async function dagCmd(goal, steps, opts = {}) {
+  const started = Date.now();
+  const workflowId = (0, import_node_crypto4.randomUUID)();
+  const stopOnFailure = opts.stopOnFailure ?? true;
+  let batches;
+  try {
+    batches = topologicalBatches(steps);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return makeReport("dag", started, "fail", {
+      workflowId,
+      goal,
+      totalSteps: steps.length,
+      completedSteps: 0,
+      failedSteps: [],
+      skippedSteps: [],
+      parallelBatches: 0,
+      maxConcurrency: 0,
+      steps: [],
+      provenanceChain: []
+    }, [], [msg]);
+  }
+  const results = /* @__PURE__ */ new Map();
+  const completedOutputs = /* @__PURE__ */ new Map();
+  const failedIds = /* @__PURE__ */ new Set();
+  const skippedIds = /* @__PURE__ */ new Set();
+  const provenanceChain = [];
+  const errors = [];
+  const warnings = [];
+  let parallelBatches = 0;
+  let maxConcurrency = 0;
+  for (const batch of batches) {
+    if (stopOnFailure && failedIds.size > 0) {
+      for (const step of batch) {
+        skippedIds.add(step.id);
+        results.set(step.id, {
+          stepId: step.id,
+          stepName: step.name,
+          status: "skipped",
+          dependsOn: step.dependsOn ?? [],
+          input: step.input ?? {},
+          output: {},
+          receiptHash: "",
+          attempts: 0,
+          durationMs: 0,
+          startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          finishedAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      }
+      continue;
+    }
+    parallelBatches++;
+    maxConcurrency = Math.max(maxConcurrency, batch.length);
+    const batchPromises = batch.map(async (step) => {
+      const stepStart = Date.now();
+      const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const upstream = {};
+      for (const dep of step.dependsOn ?? []) {
+        upstream[dep] = completedOutputs.get(dep) ?? {};
+      }
+      const dagInput = {
+        step,
+        upstream,
+        staticInput: step.input ?? {}
+      };
+      const maxAttempts = (step.retries ?? 0) + 1;
+      const { output, attempts, error } = await runWithRetry(step, dagInput, maxAttempts);
+      const durationMs = Date.now() - stepStart;
+      const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const status = error ? "failed" : "ok";
+      const receipt = status === "ok" ? stepReceipt2(step.id, step.name, step.input ?? {}, output) : "";
+      return {
+        stepId: step.id,
+        stepName: step.name,
+        status,
+        dependsOn: step.dependsOn ?? [],
+        input: step.input ?? {},
+        output,
+        receiptHash: receipt,
+        attempts,
+        durationMs,
+        startedAt,
+        finishedAt,
+        error
+      };
+    });
+    const batchResults = await Promise.all(batchPromises);
+    for (const result of batchResults) {
+      results.set(result.stepId, result);
+      if (result.status === "ok") {
+        completedOutputs.set(result.stepId, result.output);
+        provenanceChain.push(`${result.stepId}:${result.receiptHash.slice(0, 12)}`);
+      } else {
+        failedIds.add(result.stepId);
+        errors.push(
+          `Step "${result.stepId}" (${result.stepName}) failed after ${result.attempts} attempt(s): ${result.error}`
+        );
+        if (stopOnFailure) {
+          warnings.push(
+            `Stopping DAG execution after step "${result.stepId}" failed. Subsequent steps will be skipped.`
+          );
+        }
+      }
+    }
+  }
+  const allResults = steps.map((s) => results.get(s.id));
+  const completedSteps = allResults.filter((r) => r.status === "ok").length;
+  const overallStatus = failedIds.size > 0 ? "fail" : completedSteps === steps.length ? "ok" : "partial";
+  return makeReport(
+    "dag",
+    started,
+    overallStatus,
+    {
+      workflowId,
+      goal,
+      totalSteps: steps.length,
+      completedSteps,
+      failedSteps: [...failedIds],
+      skippedSteps: [...skippedIds],
+      parallelBatches,
+      maxConcurrency,
+      steps: allResults,
+      provenanceChain
+    },
+    warnings,
+    errors
+  );
+}
+function parseDagStepSpec(spec) {
+  const depMatch = spec.match(/\[([^\]]*)\]$/);
+  const deps = depMatch ? depMatch[1].split(",").map((d) => d.trim()).filter(Boolean) : [];
+  const base = spec.replace(/\[[^\]]*\]$/, "").trim();
+  const [id, ...rest] = base.split(":");
+  return {
+    id: id.trim(),
+    name: rest.join(":").trim() || id.trim(),
+    dependsOn: deps,
+    input: {}
+  };
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  dagCmd,
   discoverCmd,
   guardCmd,
   handoffCmd,
   outreachCmd,
+  parseDagStepSpec,
+  parseStepSpec,
   receiptCmd,
-  socialCmd
+  socialCmd,
+  workflowCmd
 });
