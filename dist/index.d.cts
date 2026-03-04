@@ -125,6 +125,7 @@ interface WorkflowData {
 }
 declare function workflowCmd(goal: string, steps: WorkflowStep[], opts?: {
     stopOnFailure?: boolean;
+    checkpoint?: boolean;
 }): Promise<ReturnType<typeof makeReport<WorkflowData>>>;
 /** Parse a simple step spec string: "id:name" */
 declare function parseStepSpec(spec: string): WorkflowStep;
@@ -187,4 +188,83 @@ declare function dagCmd(goal: string, steps: DagStep[], opts?: {
 /** Parse extended step spec: "id:name[dep1,dep2]" */
 declare function parseDagStepSpec(spec: string): DagStep;
 
-export { type DagInput, type DagStep, type DagStepResult, type DagWorkflowData, type GuardKind, type ReceiptListData, type ReceiptVerifyData, type StepResult, type WorkflowData, type WorkflowStep, dagCmd, discoverCmd, guardCmd, handoffCmd, outreachCmd, parseDagStepSpec, parseStepSpec, receiptCmd, receiptListCmd, receiptVerifyCmd, socialCmd, workflowCmd };
+/**
+ * checkpoint-store.ts — Persistent workflow checkpoint storage for AgentOps Forge
+ *
+ * When a workflow step completes, its result is checkpointed to disk.
+ * If the workflow fails, `replayCmd` can load the checkpoint and resume
+ * from the last successful step instead of starting from scratch.
+ *
+ * Storage: ~/.forge/checkpoints/<workflowId>.json (one file per workflow run)
+ */
+interface CheckpointStep {
+    stepId: string;
+    stepName: string;
+    status: "ok" | "failed" | "skipped";
+    input: Record<string, unknown>;
+    output: Record<string, unknown>;
+    receiptHash: string;
+    attempts: number;
+    durationMs: number;
+    error?: string;
+}
+interface WorkflowCheckpoint {
+    /** UUID matching the original workflowCmd run */
+    workflowId: string;
+    /** Human-readable goal */
+    goal: string;
+    /** ISO-8601 timestamp when the checkpoint was last written */
+    savedAt: string;
+    /** Steps that completed successfully (status === "ok") */
+    completedSteps: CheckpointStep[];
+    /** Step IDs still pending at the time the checkpoint was saved */
+    pendingStepIds: string[];
+    /** Step ID that failed, if any */
+    failedStepId: string | null;
+}
+interface CheckpointSummary {
+    workflowId: string;
+    goal: string;
+    savedAt: string;
+    completedCount: number;
+    pendingCount: number;
+    failedStepId: string | null;
+}
+/** List all saved checkpoints (unfinished workflows). */
+declare function listCheckpoints(): CheckpointSummary[];
+
+/**
+ * replay.ts — Resume a failed workflow from its last successful checkpoint
+ *
+ * When a `workflowCmd` run fails mid-way, this command loads the saved
+ * checkpoint, skips already-completed steps (preserving their outputs and
+ * receipt hashes), and resumes execution from the failed or pending step.
+ *
+ * Usage:
+ *   const report = await replayCmd(workflowId, steps);
+ *
+ * The resumed run produces a new combined report with the full step history
+ * and a fresh provenance chain that includes both carried-over and new receipts.
+ */
+
+interface ReplayOptions {
+    stopOnFailure?: boolean;
+    /** If true, clear the checkpoint file after a successful replay */
+    clearOnSuccess?: boolean;
+}
+/**
+ * Resume a workflow from a saved checkpoint.
+ *
+ * @param workflowId  The UUID from the original (failed) workflowCmd run.
+ * @param steps       The full step array — same definition as the original call.
+ *                    Already-completed steps are skipped automatically.
+ * @param opts        Replay options.
+ */
+declare function replayCmd(workflowId: string, steps: WorkflowStep[], opts?: ReplayOptions): Promise<ReturnType<typeof makeReport<WorkflowData>>>;
+/**
+ * List all saved checkpoints (workflows that failed and can be replayed).
+ * Returns a formatted summary string suitable for CLI display.
+ */
+declare function listCheckpointsSummary(): string;
+
+export { type DagInput, type DagStep, type DagStepResult, type DagWorkflowData, type GuardKind, type ReceiptListData, type ReceiptVerifyData, type ReplayOptions, type StepResult, type WorkflowCheckpoint, type WorkflowData, type WorkflowStep, dagCmd, discoverCmd, guardCmd, handoffCmd, listCheckpoints, listCheckpointsSummary, outreachCmd, parseDagStepSpec, parseStepSpec, receiptCmd, receiptListCmd, receiptVerifyCmd, replayCmd, socialCmd, workflowCmd };

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { makeReport } from "../core/report.js";
 import { storeReceipt } from "../core/receipt-store.js";
+import { saveCheckpoint, clearCheckpoint } from "../core/checkpoint-store.js";
 
 export interface WorkflowStep {
   id: string;
@@ -65,11 +66,12 @@ async function runStepWithRetry(
 export async function workflowCmd(
   goal: string,
   steps: WorkflowStep[],
-  opts: { stopOnFailure?: boolean } = {}
+  opts: { stopOnFailure?: boolean; checkpoint?: boolean } = {}
 ): Promise<ReturnType<typeof makeReport<WorkflowData>>> {
   const started = Date.now();
   const workflowId = randomUUID();
   const stopOnFailure = opts.stopOnFailure ?? true;
+  const checkpointEnabled = opts.checkpoint ?? true;
 
   const results: StepResult[] = [];
   const provenanceChain: string[] = [];
@@ -77,6 +79,18 @@ export async function workflowCmd(
   let rolledBack = false;
   const warnings: string[] = [];
   const errors: string[] = [];
+
+  // Initialize checkpoint with all steps pending
+  if (checkpointEnabled) {
+    saveCheckpoint({
+      workflowId,
+      goal,
+      savedAt: new Date().toISOString(),
+      completedSteps: [],
+      pendingStepIds: steps.map((s) => s.id),
+      failedStepId: null,
+    });
+  }
 
   for (const step of steps) {
     if (failedStep !== null && stopOnFailure) {
@@ -100,6 +114,19 @@ export async function workflowCmd(
     const status = error ? "failed" : "ok";
     const receipt = status === "ok" ? stepReceipt(step.id, step.name, step.input, output) : "";
 
+    const stepResult: StepResult = {
+      stepId: step.id,
+      stepName: step.name,
+      status,
+      input: step.input,
+      output,
+      receiptHash: receipt,
+      attempts,
+      durationMs,
+      error,
+    };
+    results.push(stepResult);
+
     if (status === "ok") {
       provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
       // Persist receipt for later verification
@@ -110,23 +137,41 @@ export async function workflowCmd(
         label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
         payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output },
       });
+      // Update checkpoint: move this step from pending → completed
+      if (checkpointEnabled) {
+        saveCheckpoint({
+          workflowId,
+          goal,
+          savedAt: new Date().toISOString(),
+          completedSteps: results
+            .filter((r) => r.status === "ok")
+            .map((r) => ({ ...r })),
+          pendingStepIds: steps
+            .slice(results.length)
+            .map((s) => s.id),
+          failedStepId: null,
+        });
+      }
     }
-
-    results.push({
-      stepId: step.id,
-      stepName: step.name,
-      status,
-      input: step.input,
-      output,
-      receiptHash: receipt,
-      attempts,
-      durationMs,
-      error,
-    });
 
     if (status === "failed") {
       failedStep = step.id;
       errors.push(`Step ${step.id} (${step.name}) failed after ${attempts} attempt(s): ${error}`);
+      // Save checkpoint with failed step noted — enables replay
+      if (checkpointEnabled) {
+        saveCheckpoint({
+          workflowId,
+          goal,
+          savedAt: new Date().toISOString(),
+          completedSteps: results
+            .filter((r) => r.status === "ok")
+            .map((r) => ({ ...r })),
+          pendingStepIds: steps
+            .slice(results.findIndex((r) => r.stepId === step.id))
+            .map((s) => s.id),
+          failedStepId: step.id,
+        });
+      }
 
       // Trigger rollback for completed steps in reverse order
       if (stopOnFailure) {
@@ -145,6 +190,11 @@ export async function workflowCmd(
     : completedSteps === steps.length
     ? "ok"
     : "partial";
+
+  // Clear checkpoint on full success — no replay needed
+  if (overallStatus === "ok" && checkpointEnabled) {
+    clearCheckpoint(workflowId);
+  }
 
   return makeReport<WorkflowData>(
     "workflow",

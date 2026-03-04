@@ -8,6 +8,8 @@ import { receiptCmd, receiptVerifyCmd, receiptListCmd } from "./commands/receipt
 import { handoffCmd } from "./commands/handoff.js";
 import { workflowCmd, parseStepSpec } from "./commands/workflow.js";
 import { dagCmd, parseDagStepSpec } from "./commands/dag.js";
+import { healthCmd, type HealthTarget } from "./commands/health.js";
+import { replayCmd, listCheckpointsSummary } from "./commands/replay.js";
 
 const program = new Command();
 program.name("agentops-forge").description("Professional toolkit for autonomous agent operations").version("0.1.0");
@@ -107,6 +109,47 @@ program
     const steps = stepSpecs.map((s) => parseDagStepSpec(s)).filter((s) => s.id);
     const result = await dagCmd(opts.goal, steps, { stopOnFailure: opts.stopOnFailure });
     console.log(JSON.stringify(result, null, 2));
+  });
+
+// ─── health ──────────────────────────────────────────────────────────────────
+program
+  .command("health")
+  .description("Check liveness and latency of all key services (A2A, AgentMail, Clawk, network)")
+  .option("-t, --target <target>", "service to check: all | a2a | agentmail | clawk | network", "all")
+  .action(async (opts) => {
+    console.log(JSON.stringify(await healthCmd(opts.target as HealthTarget), null, 2));
+  });
+
+// ─── replay ──────────────────────────────────────────────────────────────────
+const replayGroup = program
+  .command("replay")
+  .description("Resume a failed workflow from its last checkpoint, or list saved checkpoints");
+
+replayGroup
+  .command("run <workflowId>")
+  .description("Resume a failed workflow by its workflowId")
+  .option("--steps <steps>", "step specs to re-run: id:name,id2:name2 (same as original workflow)", "")
+  .option("--no-stop-on-failure", "continue after a step failure")
+  .option("--keep", "keep the checkpoint file even on full success", false)
+  .action(async (workflowId: string, opts) => {
+    const steps = opts.steps
+      ? String(opts.steps)
+          .split(",")
+          .map((s: string) => parseStepSpec(s.trim()))
+          .filter((s: ReturnType<typeof parseStepSpec>) => s.id)
+      : [];
+    const result = await replayCmd(workflowId, steps, {
+      stopOnFailure: opts.stopOnFailure,
+      clearOnSuccess: !opts.keep,
+    });
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+replayGroup
+  .command("list")
+  .description("List all saved checkpoints (workflows that failed and can be replayed)")
+  .action(() => {
+    console.log(listCheckpointsSummary());
   });
 
 program.parse();

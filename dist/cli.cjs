@@ -269,6 +269,67 @@ async function handoffCmd(task, goal) {
 
 // src/commands/workflow.ts
 var import_node_crypto3 = require("crypto");
+
+// src/core/checkpoint-store.ts
+var import_node_fs3 = require("fs");
+var import_node_os2 = require("os");
+var import_node_path2 = require("path");
+var CHECKPOINT_DIR = (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".forge", "checkpoints");
+function ensureDir() {
+  if (!(0, import_node_fs3.existsSync)(CHECKPOINT_DIR)) {
+    (0, import_node_fs3.mkdirSync)(CHECKPOINT_DIR, { recursive: true });
+  }
+}
+function checkpointPath(workflowId) {
+  return (0, import_node_path2.join)(CHECKPOINT_DIR, `${workflowId}.json`);
+}
+function saveCheckpoint(checkpoint) {
+  ensureDir();
+  (0, import_node_fs3.writeFileSync)(
+    checkpointPath(checkpoint.workflowId),
+    JSON.stringify({ ...checkpoint, savedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2),
+    "utf8"
+  );
+}
+function loadCheckpoint(workflowId) {
+  const path = checkpointPath(workflowId);
+  if (!(0, import_node_fs3.existsSync)(path)) return null;
+  try {
+    return JSON.parse((0, import_node_fs3.readFileSync)(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function clearCheckpoint(workflowId) {
+  const path = checkpointPath(workflowId);
+  if (!(0, import_node_fs3.existsSync)(path)) return false;
+  (0, import_node_fs3.unlinkSync)(path);
+  return true;
+}
+function listCheckpoints() {
+  ensureDir();
+  const files = (0, import_node_fs3.readdirSync)(CHECKPOINT_DIR).filter((f) => f.endsWith(".json"));
+  const summaries = [];
+  for (const file of files) {
+    try {
+      const cp = JSON.parse(
+        (0, import_node_fs3.readFileSync)((0, import_node_path2.join)(CHECKPOINT_DIR, file), "utf8")
+      );
+      summaries.push({
+        workflowId: cp.workflowId,
+        goal: cp.goal,
+        savedAt: cp.savedAt,
+        completedCount: cp.completedSteps.length,
+        pendingCount: cp.pendingStepIds.length,
+        failedStepId: cp.failedStepId
+      });
+    } catch {
+    }
+  }
+  return summaries.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+}
+
+// src/commands/workflow.ts
 async function defaultExecute(input) {
   return { acknowledged: true, ...input };
 }
@@ -293,12 +354,23 @@ async function workflowCmd(goal, steps, opts = {}) {
   const started = Date.now();
   const workflowId = (0, import_node_crypto3.randomUUID)();
   const stopOnFailure = opts.stopOnFailure ?? true;
+  const checkpointEnabled = opts.checkpoint ?? true;
   const results = [];
   const provenanceChain = [];
   let failedStep = null;
   let rolledBack = false;
   const warnings = [];
   const errors = [];
+  if (checkpointEnabled) {
+    saveCheckpoint({
+      workflowId,
+      goal,
+      savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      completedSteps: [],
+      pendingStepIds: steps.map((s) => s.id),
+      failedStepId: null
+    });
+  }
   for (const step of steps) {
     if (failedStep !== null && stopOnFailure) {
       results.push({
@@ -319,17 +391,7 @@ async function workflowCmd(goal, steps, opts = {}) {
     const durationMs = Date.now() - stepStart;
     const status = error ? "failed" : "ok";
     const receipt = status === "ok" ? stepReceipt(step.id, step.name, step.input, output) : "";
-    if (status === "ok") {
-      provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
-      storeReceipt({
-        receiptHash: receipt,
-        kind: "step",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
-        payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output }
-      });
-    }
-    results.push({
+    const stepResult = {
       stepId: step.id,
       stepName: step.name,
       status,
@@ -339,10 +401,41 @@ async function workflowCmd(goal, steps, opts = {}) {
       attempts,
       durationMs,
       error
-    });
+    };
+    results.push(stepResult);
+    if (status === "ok") {
+      provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
+      storeReceipt({
+        receiptHash: receipt,
+        kind: "step",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
+        payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output }
+      });
+      if (checkpointEnabled) {
+        saveCheckpoint({
+          workflowId,
+          goal,
+          savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          completedSteps: results.filter((r) => r.status === "ok").map((r) => ({ ...r })),
+          pendingStepIds: steps.slice(results.length).map((s) => s.id),
+          failedStepId: null
+        });
+      }
+    }
     if (status === "failed") {
       failedStep = step.id;
       errors.push(`Step ${step.id} (${step.name}) failed after ${attempts} attempt(s): ${error}`);
+      if (checkpointEnabled) {
+        saveCheckpoint({
+          workflowId,
+          goal,
+          savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          completedSteps: results.filter((r) => r.status === "ok").map((r) => ({ ...r })),
+          pendingStepIds: steps.slice(results.findIndex((r) => r.stepId === step.id)).map((s) => s.id),
+          failedStepId: step.id
+        });
+      }
       if (stopOnFailure) {
         const completed = results.filter((r) => r.status === "ok");
         for (const prev of completed.reverse()) {
@@ -354,6 +447,9 @@ async function workflowCmd(goal, steps, opts = {}) {
   }
   const completedSteps = results.filter((r) => r.status === "ok").length;
   const overallStatus = failedStep ? "fail" : completedSteps === steps.length ? "ok" : "partial";
+  if (overallStatus === "ok" && checkpointEnabled) {
+    clearCheckpoint(workflowId);
+  }
   return makeReport(
     "workflow",
     started,
@@ -594,6 +690,289 @@ function parseDagStepSpec(spec) {
   };
 }
 
+// src/commands/health.ts
+var TIMEOUT_MS = 6e3;
+async function probe(service, url, options = {}) {
+  const t0 = Date.now();
+  const expectedStatus = options.expectedStatus ?? 200;
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: options.headers ?? {}
+    });
+    clearTimeout(tid);
+    const latencyMs = Date.now() - t0;
+    const ok = res.status === expectedStatus || res.status >= 200 && res.status < 300;
+    return {
+      service,
+      url,
+      status: ok ? "ok" : "degraded",
+      httpCode: res.status,
+      latencyMs,
+      detail: ok ? void 0 : `unexpected status ${res.status}`
+    };
+  } catch (err) {
+    return {
+      service,
+      url,
+      status: "down",
+      latencyMs: Date.now() - t0,
+      detail: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+async function checkA2A() {
+  return probe(
+    "a2a-server",
+    "https://gerundium-a2a-production.up.railway.app/.well-known/agent.json"
+  );
+}
+async function checkAgentMail() {
+  const apiKey = process.env.AGENTMAIL_API_KEY ?? "";
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const t0 = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const res = await fetch("https://api.agentmail.to/v0/inboxes", {
+      method: "GET",
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", ...headers }
+    });
+    clearTimeout(tid);
+    const latencyMs = Date.now() - t0;
+    const ok = res.status === 200 || res.status === 401;
+    return {
+      service: "agentmail",
+      url: "https://api.agentmail.to/v0/inboxes",
+      status: res.status === 200 ? "ok" : res.status === 401 ? "degraded" : "down",
+      httpCode: res.status,
+      latencyMs,
+      detail: res.status === 200 ? "authenticated" : res.status === 401 ? "reachable (auth check)" : `unexpected ${res.status}`
+    };
+  } catch (err) {
+    return {
+      service: "agentmail",
+      url: "https://api.agentmail.to/v0/inboxes",
+      status: "down",
+      latencyMs: Date.now() - t0,
+      detail: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+async function checkClawk() {
+  return probe("clawk-api", "https://www.clawk.ai/api/v1/agents/me", {
+    headers: {
+      Authorization: `Bearer ${process.env.CLAWK_API_KEY ?? ""}`,
+      "Content-Type": "application/json"
+    }
+  });
+}
+async function checkNetwork() {
+  return probe("network-dns", "https://1.1.1.1/cdn-cgi/trace");
+}
+var CHECK_MAP = {
+  a2a: checkA2A,
+  agentmail: checkAgentMail,
+  clawk: checkClawk,
+  network: checkNetwork
+};
+async function healthCmd(target) {
+  const started = Date.now();
+  const targets = target === "all" ? Object.keys(CHECK_MAP) : [target];
+  const checks = await Promise.all(
+    targets.map((t) => CHECK_MAP[t] ? CHECK_MAP[t]() : Promise.resolve({
+      service: t,
+      url: "<unknown>",
+      status: "down",
+      latencyMs: 0,
+      detail: `Unknown target: ${t}`
+    }))
+  );
+  const healthy = checks.filter((c) => c.status === "ok").length;
+  const degraded = checks.filter((c) => c.status === "degraded").length;
+  const down = checks.filter((c) => c.status === "down").length;
+  const totalLatencyMs = checks.reduce((s, c) => s + c.latencyMs, 0);
+  const status = down > 0 ? healthy > 0 ? "partial" : "fail" : "ok";
+  const errors = checks.filter((c) => c.status === "down").map((c) => `${c.service} is DOWN: ${c.detail ?? "no detail"}`);
+  const warnings = checks.filter((c) => c.status === "degraded").map((c) => `${c.service} is degraded: ${c.detail ?? "no detail"}`);
+  return makeReport(
+    "health",
+    started,
+    status,
+    { target, checks, healthy, degraded, down, totalLatencyMs },
+    warnings,
+    errors
+  );
+}
+
+// src/commands/replay.ts
+var import_node_crypto5 = require("crypto");
+async function defaultExecute3(input) {
+  return { acknowledged: true, ...input };
+}
+function computeReceipt(stepId, stepName, input, output) {
+  return (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify({ stepId, stepName, input, output })).digest("hex");
+}
+async function runWithRetry2(step, maxAttempts) {
+  const exec = step.execute ?? defaultExecute3;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return { output: await exec(step.input), attempts: attempt };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { output: {}, attempts: maxAttempts, error: lastError };
+}
+async function replayCmd(workflowId, steps, opts = {}) {
+  const started = Date.now();
+  const stopOnFailure = opts.stopOnFailure ?? true;
+  const clearOnSuccess = opts.clearOnSuccess ?? true;
+  const checkpoint = loadCheckpoint(workflowId);
+  if (!checkpoint) {
+    return makeReport(
+      "replay",
+      started,
+      "fail",
+      {
+        workflowId,
+        goal: `<replay: no checkpoint found for ${workflowId}>`,
+        totalSteps: steps.length,
+        completedSteps: 0,
+        failedStep: null,
+        rolledBack: false,
+        steps: [],
+        provenanceChain: []
+      },
+      [],
+      [`No checkpoint found for workflowId: ${workflowId}`]
+    );
+  }
+  const goal = checkpoint.goal;
+  const completedById = new Map(
+    checkpoint.completedSteps.map((s) => [s.stepId, s])
+  );
+  const results = [];
+  const provenanceChain = [];
+  for (const cs of checkpoint.completedSteps) {
+    results.push(cs);
+    provenanceChain.push(cs.receiptHash);
+  }
+  const warnings = [];
+  const errors = [];
+  let failedStep = null;
+  let rolledBack = false;
+  for (const step of steps) {
+    if (completedById.has(step.id)) {
+      continue;
+    }
+    const maxAttempts = Math.max(1, (step.retries ?? 0) + 1);
+    const stepStart = Date.now();
+    const { output, attempts, error } = await runWithRetry2(step, maxAttempts);
+    const durationMs = Date.now() - stepStart;
+    const status = error ? "failed" : "ok";
+    const receiptHash = computeReceipt(step.id, step.name, step.input, output);
+    storeReceipt({
+      receiptHash,
+      kind: "step",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      label: `${step.id}:${step.name}`,
+      payload: { stepId: step.id, stepName: step.name, input: step.input, output }
+    });
+    provenanceChain.push(receiptHash);
+    const result = {
+      stepId: step.id,
+      stepName: step.name,
+      status,
+      input: step.input,
+      output,
+      receiptHash,
+      attempts,
+      durationMs,
+      error
+    };
+    results.push(result);
+    if (status === "ok") {
+      const updatedCheckpoint = {
+        ...checkpoint,
+        completedSteps: [...checkpoint.completedSteps, result],
+        pendingStepIds: checkpoint.pendingStepIds.filter((id) => id !== step.id),
+        failedStepId: null
+      };
+      saveCheckpoint(updatedCheckpoint);
+    } else {
+      failedStep = step.id;
+      errors.push(`Step ${step.id} (${step.name}) failed after ${attempts} attempt(s): ${error}`);
+      if (stopOnFailure) {
+        const completed = results.filter((r) => r.status === "ok");
+        for (const prev of completed.reverse()) {
+          warnings.push(`Rollback: step ${prev.stepId} (${prev.stepName}) marked for reversal`);
+        }
+        rolledBack = completed.length > 0;
+        break;
+      }
+    }
+  }
+  const executedIds = new Set(results.map((r) => r.stepId));
+  for (const step of steps) {
+    if (!executedIds.has(step.id)) {
+      results.push({
+        stepId: step.id,
+        stepName: step.name,
+        status: "skipped",
+        input: step.input,
+        output: {},
+        receiptHash: "",
+        attempts: 0,
+        durationMs: 0
+      });
+    }
+  }
+  const completedCount = results.filter((r) => r.status === "ok").length;
+  const overallStatus = failedStep ? "fail" : completedCount === steps.length ? "ok" : "partial";
+  if (overallStatus === "ok" && clearOnSuccess) {
+    clearCheckpoint(workflowId);
+  }
+  return makeReport(
+    "replay",
+    started,
+    overallStatus,
+    {
+      workflowId,
+      goal,
+      totalSteps: steps.length,
+      completedSteps: completedCount,
+      failedStep,
+      rolledBack,
+      steps: results,
+      provenanceChain
+    },
+    warnings,
+    errors
+  );
+}
+function listCheckpointsSummary() {
+  const checkpoints = listCheckpoints();
+  if (checkpoints.length === 0) {
+    return "No saved checkpoints. All workflows completed cleanly.";
+  }
+  const lines = ["Saved workflow checkpoints:", ""];
+  for (const cp of checkpoints) {
+    lines.push(`  workflowId: ${cp.workflowId}`);
+    lines.push(`  goal:       ${cp.goal}`);
+    lines.push(`  savedAt:    ${cp.savedAt}`);
+    lines.push(`  completed:  ${cp.completedCount} steps`);
+    lines.push(`  pending:    ${cp.pendingCount} steps`);
+    lines.push(`  failed:     ${cp.failedStepId ?? "none"}`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 // src/cli.ts
 var program = new import_commander.Command();
 program.name("agentops-forge").description("Professional toolkit for autonomous agent operations").version("0.1.0");
@@ -653,5 +1032,20 @@ program.command("dag").description("Run a DAG-based workflow: parallel steps, pr
   const steps = stepSpecs.map((s) => parseDagStepSpec(s)).filter((s) => s.id);
   const result = await dagCmd(opts.goal, steps, { stopOnFailure: opts.stopOnFailure });
   console.log(JSON.stringify(result, null, 2));
+});
+program.command("health").description("Check liveness and latency of all key services (A2A, AgentMail, Clawk, network)").option("-t, --target <target>", "service to check: all | a2a | agentmail | clawk | network", "all").action(async (opts) => {
+  console.log(JSON.stringify(await healthCmd(opts.target), null, 2));
+});
+var replayGroup = program.command("replay").description("Resume a failed workflow from its last checkpoint, or list saved checkpoints");
+replayGroup.command("run <workflowId>").description("Resume a failed workflow by its workflowId").option("--steps <steps>", "step specs to re-run: id:name,id2:name2 (same as original workflow)", "").option("--no-stop-on-failure", "continue after a step failure").option("--keep", "keep the checkpoint file even on full success", false).action(async (workflowId, opts) => {
+  const steps = opts.steps ? String(opts.steps).split(",").map((s) => parseStepSpec(s.trim())).filter((s) => s.id) : [];
+  const result = await replayCmd(workflowId, steps, {
+    stopOnFailure: opts.stopOnFailure,
+    clearOnSuccess: !opts.keep
+  });
+  console.log(JSON.stringify(result, null, 2));
+});
+replayGroup.command("list").description("List all saved checkpoints (workflows that failed and can be replayed)").action(() => {
+  console.log(listCheckpointsSummary());
 });
 program.parse();

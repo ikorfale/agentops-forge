@@ -2,7 +2,7 @@
  * receipt.test.ts — Tests for receipt create / verify / list + receipt-store
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -142,6 +142,7 @@ describe("receiptVerifyCmd", () => {
 
 describe("receiptListCmd", () => {
   beforeEach(cleanup);
+  afterEach(cleanup);
 
   it("returns empty list when store is empty", async () => {
     const result = await receiptListCmd(10);

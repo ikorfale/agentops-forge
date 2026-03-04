@@ -34,12 +34,15 @@ __export(index_exports, {
   discoverCmd: () => discoverCmd,
   guardCmd: () => guardCmd,
   handoffCmd: () => handoffCmd,
+  listCheckpoints: () => listCheckpoints,
+  listCheckpointsSummary: () => listCheckpointsSummary,
   outreachCmd: () => outreachCmd,
   parseDagStepSpec: () => parseDagStepSpec,
   parseStepSpec: () => parseStepSpec,
   receiptCmd: () => receiptCmd,
   receiptListCmd: () => receiptListCmd,
   receiptVerifyCmd: () => receiptVerifyCmd,
+  replayCmd: () => replayCmd,
   socialCmd: () => socialCmd,
   workflowCmd: () => workflowCmd
 });
@@ -288,6 +291,67 @@ async function handoffCmd(task, goal) {
 
 // src/commands/workflow.ts
 var import_node_crypto3 = require("crypto");
+
+// src/core/checkpoint-store.ts
+var import_node_fs3 = require("fs");
+var import_node_os2 = require("os");
+var import_node_path2 = require("path");
+var CHECKPOINT_DIR = (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".forge", "checkpoints");
+function ensureDir() {
+  if (!(0, import_node_fs3.existsSync)(CHECKPOINT_DIR)) {
+    (0, import_node_fs3.mkdirSync)(CHECKPOINT_DIR, { recursive: true });
+  }
+}
+function checkpointPath(workflowId) {
+  return (0, import_node_path2.join)(CHECKPOINT_DIR, `${workflowId}.json`);
+}
+function saveCheckpoint(checkpoint) {
+  ensureDir();
+  (0, import_node_fs3.writeFileSync)(
+    checkpointPath(checkpoint.workflowId),
+    JSON.stringify({ ...checkpoint, savedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2),
+    "utf8"
+  );
+}
+function loadCheckpoint(workflowId) {
+  const path = checkpointPath(workflowId);
+  if (!(0, import_node_fs3.existsSync)(path)) return null;
+  try {
+    return JSON.parse((0, import_node_fs3.readFileSync)(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function clearCheckpoint(workflowId) {
+  const path = checkpointPath(workflowId);
+  if (!(0, import_node_fs3.existsSync)(path)) return false;
+  (0, import_node_fs3.unlinkSync)(path);
+  return true;
+}
+function listCheckpoints() {
+  ensureDir();
+  const files = (0, import_node_fs3.readdirSync)(CHECKPOINT_DIR).filter((f) => f.endsWith(".json"));
+  const summaries = [];
+  for (const file of files) {
+    try {
+      const cp = JSON.parse(
+        (0, import_node_fs3.readFileSync)((0, import_node_path2.join)(CHECKPOINT_DIR, file), "utf8")
+      );
+      summaries.push({
+        workflowId: cp.workflowId,
+        goal: cp.goal,
+        savedAt: cp.savedAt,
+        completedCount: cp.completedSteps.length,
+        pendingCount: cp.pendingStepIds.length,
+        failedStepId: cp.failedStepId
+      });
+    } catch {
+    }
+  }
+  return summaries.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+}
+
+// src/commands/workflow.ts
 async function defaultExecute(input) {
   return { acknowledged: true, ...input };
 }
@@ -312,12 +376,23 @@ async function workflowCmd(goal, steps, opts = {}) {
   const started = Date.now();
   const workflowId = (0, import_node_crypto3.randomUUID)();
   const stopOnFailure = opts.stopOnFailure ?? true;
+  const checkpointEnabled = opts.checkpoint ?? true;
   const results = [];
   const provenanceChain = [];
   let failedStep = null;
   let rolledBack = false;
   const warnings = [];
   const errors = [];
+  if (checkpointEnabled) {
+    saveCheckpoint({
+      workflowId,
+      goal,
+      savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      completedSteps: [],
+      pendingStepIds: steps.map((s) => s.id),
+      failedStepId: null
+    });
+  }
   for (const step of steps) {
     if (failedStep !== null && stopOnFailure) {
       results.push({
@@ -338,17 +413,7 @@ async function workflowCmd(goal, steps, opts = {}) {
     const durationMs = Date.now() - stepStart;
     const status = error ? "failed" : "ok";
     const receipt = status === "ok" ? stepReceipt(step.id, step.name, step.input, output) : "";
-    if (status === "ok") {
-      provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
-      storeReceipt({
-        receiptHash: receipt,
-        kind: "step",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
-        payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output }
-      });
-    }
-    results.push({
+    const stepResult = {
       stepId: step.id,
       stepName: step.name,
       status,
@@ -358,10 +423,41 @@ async function workflowCmd(goal, steps, opts = {}) {
       attempts,
       durationMs,
       error
-    });
+    };
+    results.push(stepResult);
+    if (status === "ok") {
+      provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
+      storeReceipt({
+        receiptHash: receipt,
+        kind: "step",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
+        payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output }
+      });
+      if (checkpointEnabled) {
+        saveCheckpoint({
+          workflowId,
+          goal,
+          savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          completedSteps: results.filter((r) => r.status === "ok").map((r) => ({ ...r })),
+          pendingStepIds: steps.slice(results.length).map((s) => s.id),
+          failedStepId: null
+        });
+      }
+    }
     if (status === "failed") {
       failedStep = step.id;
       errors.push(`Step ${step.id} (${step.name}) failed after ${attempts} attempt(s): ${error}`);
+      if (checkpointEnabled) {
+        saveCheckpoint({
+          workflowId,
+          goal,
+          savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          completedSteps: results.filter((r) => r.status === "ok").map((r) => ({ ...r })),
+          pendingStepIds: steps.slice(results.findIndex((r) => r.stepId === step.id)).map((s) => s.id),
+          failedStepId: step.id
+        });
+      }
       if (stopOnFailure) {
         const completed = results.filter((r) => r.status === "ok");
         for (const prev of completed.reverse()) {
@@ -373,6 +469,9 @@ async function workflowCmd(goal, steps, opts = {}) {
   }
   const completedSteps = results.filter((r) => r.status === "ok").length;
   const overallStatus = failedStep ? "fail" : completedSteps === steps.length ? "ok" : "partial";
+  if (overallStatus === "ok" && checkpointEnabled) {
+    clearCheckpoint(workflowId);
+  }
   return makeReport(
     "workflow",
     started,
@@ -612,18 +711,186 @@ function parseDagStepSpec(spec) {
     input: {}
   };
 }
+
+// src/commands/replay.ts
+var import_node_crypto5 = require("crypto");
+async function defaultExecute3(input) {
+  return { acknowledged: true, ...input };
+}
+function computeReceipt(stepId, stepName, input, output) {
+  return (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify({ stepId, stepName, input, output })).digest("hex");
+}
+async function runWithRetry2(step, maxAttempts) {
+  const exec = step.execute ?? defaultExecute3;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return { output: await exec(step.input), attempts: attempt };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { output: {}, attempts: maxAttempts, error: lastError };
+}
+async function replayCmd(workflowId, steps, opts = {}) {
+  const started = Date.now();
+  const stopOnFailure = opts.stopOnFailure ?? true;
+  const clearOnSuccess = opts.clearOnSuccess ?? true;
+  const checkpoint = loadCheckpoint(workflowId);
+  if (!checkpoint) {
+    return makeReport(
+      "replay",
+      started,
+      "fail",
+      {
+        workflowId,
+        goal: `<replay: no checkpoint found for ${workflowId}>`,
+        totalSteps: steps.length,
+        completedSteps: 0,
+        failedStep: null,
+        rolledBack: false,
+        steps: [],
+        provenanceChain: []
+      },
+      [],
+      [`No checkpoint found for workflowId: ${workflowId}`]
+    );
+  }
+  const goal = checkpoint.goal;
+  const completedById = new Map(
+    checkpoint.completedSteps.map((s) => [s.stepId, s])
+  );
+  const results = [];
+  const provenanceChain = [];
+  for (const cs of checkpoint.completedSteps) {
+    results.push(cs);
+    provenanceChain.push(cs.receiptHash);
+  }
+  const warnings = [];
+  const errors = [];
+  let failedStep = null;
+  let rolledBack = false;
+  for (const step of steps) {
+    if (completedById.has(step.id)) {
+      continue;
+    }
+    const maxAttempts = Math.max(1, (step.retries ?? 0) + 1);
+    const stepStart = Date.now();
+    const { output, attempts, error } = await runWithRetry2(step, maxAttempts);
+    const durationMs = Date.now() - stepStart;
+    const status = error ? "failed" : "ok";
+    const receiptHash = computeReceipt(step.id, step.name, step.input, output);
+    storeReceipt({
+      receiptHash,
+      kind: "step",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      label: `${step.id}:${step.name}`,
+      payload: { stepId: step.id, stepName: step.name, input: step.input, output }
+    });
+    provenanceChain.push(receiptHash);
+    const result = {
+      stepId: step.id,
+      stepName: step.name,
+      status,
+      input: step.input,
+      output,
+      receiptHash,
+      attempts,
+      durationMs,
+      error
+    };
+    results.push(result);
+    if (status === "ok") {
+      const updatedCheckpoint = {
+        ...checkpoint,
+        completedSteps: [...checkpoint.completedSteps, result],
+        pendingStepIds: checkpoint.pendingStepIds.filter((id) => id !== step.id),
+        failedStepId: null
+      };
+      saveCheckpoint(updatedCheckpoint);
+    } else {
+      failedStep = step.id;
+      errors.push(`Step ${step.id} (${step.name}) failed after ${attempts} attempt(s): ${error}`);
+      if (stopOnFailure) {
+        const completed = results.filter((r) => r.status === "ok");
+        for (const prev of completed.reverse()) {
+          warnings.push(`Rollback: step ${prev.stepId} (${prev.stepName}) marked for reversal`);
+        }
+        rolledBack = completed.length > 0;
+        break;
+      }
+    }
+  }
+  const executedIds = new Set(results.map((r) => r.stepId));
+  for (const step of steps) {
+    if (!executedIds.has(step.id)) {
+      results.push({
+        stepId: step.id,
+        stepName: step.name,
+        status: "skipped",
+        input: step.input,
+        output: {},
+        receiptHash: "",
+        attempts: 0,
+        durationMs: 0
+      });
+    }
+  }
+  const completedCount = results.filter((r) => r.status === "ok").length;
+  const overallStatus = failedStep ? "fail" : completedCount === steps.length ? "ok" : "partial";
+  if (overallStatus === "ok" && clearOnSuccess) {
+    clearCheckpoint(workflowId);
+  }
+  return makeReport(
+    "replay",
+    started,
+    overallStatus,
+    {
+      workflowId,
+      goal,
+      totalSteps: steps.length,
+      completedSteps: completedCount,
+      failedStep,
+      rolledBack,
+      steps: results,
+      provenanceChain
+    },
+    warnings,
+    errors
+  );
+}
+function listCheckpointsSummary() {
+  const checkpoints = listCheckpoints();
+  if (checkpoints.length === 0) {
+    return "No saved checkpoints. All workflows completed cleanly.";
+  }
+  const lines = ["Saved workflow checkpoints:", ""];
+  for (const cp of checkpoints) {
+    lines.push(`  workflowId: ${cp.workflowId}`);
+    lines.push(`  goal:       ${cp.goal}`);
+    lines.push(`  savedAt:    ${cp.savedAt}`);
+    lines.push(`  completed:  ${cp.completedCount} steps`);
+    lines.push(`  pending:    ${cp.pendingCount} steps`);
+    lines.push(`  failed:     ${cp.failedStepId ?? "none"}`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   dagCmd,
   discoverCmd,
   guardCmd,
   handoffCmd,
+  listCheckpoints,
+  listCheckpointsSummary,
   outreachCmd,
   parseDagStepSpec,
   parseStepSpec,
   receiptCmd,
   receiptListCmd,
   receiptVerifyCmd,
+  replayCmd,
   socialCmd,
   workflowCmd
 });

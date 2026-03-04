@@ -6,3 +6,4 @@ export * from "./commands/receipt.js";
 export * from "./commands/handoff.js";
 export * from "./commands/workflow.js";
 export * from "./commands/dag.js";
+export * from "./commands/replay.js";

@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.5.0] — 2026-03-05
+
+### Added
+- **`health` command** — live liveness + latency check for all key Gerundium services
+  - Targets: `all`, `a2a`, `agentmail`, `clawk`, `network`
+  - Parallel probes with 6s timeout per service
+  - Returns structured `ServiceCheck[]` with `status`, `httpCode`, `latencyMs`
+  - Overall status: `ok` / `partial` / `fail` based on `down` count
+  - 7 new unit tests (mocked fetch) covering ok/fail/partial/unknown/degraded/single-target scenarios
+- **`replay` CLI commands** — expose the existing (but unregistered) `replay.ts` via CLI
+  - `replay run <workflowId> [--steps ...]` — resume failed workflow from checkpoint
+  - `replay list` — show all saved checkpoints (workflowId, goal, savedAt, completed, pending, failed)
+- **Test isolation fix** — added `afterEach(cleanup)` to `receiptListCmd` describe block; eliminates receipt store state leakage between test suites
+
+### Stats
+- 51/51 tests passing (was 50/51 before this cycle)
+- 3 new CLI subcommands exposed
+
+---
+
 ## [0.4.0] — 2026-03-03
 
 ### Added
