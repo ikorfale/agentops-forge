@@ -4,7 +4,7 @@ import { discoverCmd } from "./commands/discover.js";
 import { outreachCmd } from "./commands/outreach.js";
 import { socialCmd } from "./commands/social.js";
 import { guardCmd } from "./commands/guard.js";
-import { receiptCmd } from "./commands/receipt.js";
+import { receiptCmd, receiptVerifyCmd, receiptListCmd } from "./commands/receipt.js";
 import { handoffCmd } from "./commands/handoff.js";
 import { workflowCmd, parseStepSpec } from "./commands/workflow.js";
 import { dagCmd, parseDagStepSpec } from "./commands/dag.js";
@@ -28,9 +28,41 @@ program.command("guard").requiredOption("--kind <kind>").action(async (opts) => 
   console.log(JSON.stringify(await guardCmd(opts.kind), null, 2));
 });
 
-program.command("receipt").requiredOption("--intent <intent>").requiredOption("--outcome <outcome>").action(async (opts) => {
-  console.log(JSON.stringify(await receiptCmd(opts.intent, opts.outcome), null, 2));
-});
+// receipt — subcommands: create (default), verify, list
+const receiptGroup = program.command("receipt").description("Create, verify, or list provenance receipts");
+
+receiptGroup
+  .command("create")
+  .description("Create a new provenance receipt and persist it to the store")
+  .requiredOption("--intent <intent>", "what was intended")
+  .requiredOption("--outcome <outcome>", "what actually happened")
+  .action(async (opts) => {
+    console.log(JSON.stringify(await receiptCmd(opts.intent, opts.outcome), null, 2));
+  });
+
+receiptGroup
+  .command("verify <hash>")
+  .description("Verify a receipt hash — look it up in the persistent store")
+  .action(async (hash: string) => {
+    console.log(JSON.stringify(await receiptVerifyCmd(hash), null, 2));
+  });
+
+receiptGroup
+  .command("list")
+  .description("List recent receipts from the persistent store")
+  .option("-n, --limit <n>", "max receipts to show", "20")
+  .action(async (opts) => {
+    console.log(JSON.stringify(await receiptListCmd(Number(opts.limit)), null, 2));
+  });
+
+// Keep the legacy `receipt --intent --outcome` form working for backward compatibility
+program
+  .command("receipt-create", { hidden: true })
+  .requiredOption("--intent <intent>")
+  .requiredOption("--outcome <outcome>")
+  .action(async (opts) => {
+    console.log(JSON.stringify(await receiptCmd(opts.intent, opts.outcome), null, 2));
+  });
 
 program.command("handoff").requiredOption("--task <task>").requiredOption("--goal <goal>").action(async (opts) => {
   console.log(JSON.stringify(await handoffCmd(opts.task, opts.goal), null, 2));

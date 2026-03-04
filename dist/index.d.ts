@@ -57,6 +57,31 @@ declare function receiptCmd(intent: string, outcome: string): Promise<ForgeRepor
     outcome: string;
     receiptHash: string;
 }>>;
+interface ReceiptVerifyData {
+    hash: string;
+    found: boolean;
+    receipt?: {
+        receiptHash: string;
+        kind: string;
+        createdAt: string;
+        label: string;
+        payload: Record<string, unknown>;
+        requestId?: string;
+    };
+    storePath: string;
+}
+declare function receiptVerifyCmd(hash: string): Promise<ForgeReport<ReceiptVerifyData>>;
+interface ReceiptListData {
+    count: number;
+    receipts: Array<{
+        receiptHash: string;
+        kind: string;
+        createdAt: string;
+        label: string;
+    }>;
+    storePath: string;
+}
+declare function receiptListCmd(limit?: number): Promise<ForgeReport<ReceiptListData>>;
 
 declare function handoffCmd(task: string, goal: string): Promise<ForgeReport<{
     score: number;
@@ -162,4 +187,4 @@ declare function dagCmd(goal: string, steps: DagStep[], opts?: {
 /** Parse extended step spec: "id:name[dep1,dep2]" */
 declare function parseDagStepSpec(spec: string): DagStep;
 
-export { type DagInput, type DagStep, type DagStepResult, type DagWorkflowData, type GuardKind, type StepResult, type WorkflowData, type WorkflowStep, dagCmd, discoverCmd, guardCmd, handoffCmd, outreachCmd, parseDagStepSpec, parseStepSpec, receiptCmd, socialCmd, workflowCmd };
+export { type DagInput, type DagStep, type DagStepResult, type DagWorkflowData, type GuardKind, type ReceiptListData, type ReceiptVerifyData, type StepResult, type WorkflowData, type WorkflowStep, dagCmd, discoverCmd, guardCmd, handoffCmd, outreachCmd, parseDagStepSpec, parseStepSpec, receiptCmd, receiptListCmd, receiptVerifyCmd, socialCmd, workflowCmd };

@@ -26,13 +26,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Generic fallback for unknown kinds: single pass check
   - Emits `errors[]` for every failed check; status is `ok|partial|fail`
 
+## [0.5.0] — 2026-03-04
+
+### Added
+- **Receipt persistence & verification** — closes the provenance loop
+  - New `receipt-store.ts` core module: JSONL log at `~/.forge/receipts.jsonl`
+  - `receipt create --intent --outcome` — creates receipt AND persists it
+  - `receipt verify <hash>` — looks up any hash from the store; returns full payload or `found: false` + `fail` status
+  - `receipt list [-n N]` — returns N most-recent receipts (newest first)
+  - Workflow step receipts (`workflow`, `dag`) now also auto-persist to store
+- **12 new tests** for receipt-store + create/verify/list — all green (38 total ✅)
+
+### Improved
+- CLI `receipt` restructured as subcommand group (`create` / `verify` / `list`); legacy hidden `receipt-create` alias preserved for backward compatibility
+
 ## [Unreleased]
 
 ### Planned
 - A2A / MCP bridge for interoperability with external agent networks
 - KPI tracker integration (activation rate, failure rate, receipt coverage)
 - Runtime guardrail hooks with configurable deny-lists
-- Receipt verification CLI (`receipt verify <hash>`)
 - Agent-to-agent handoff with typed contract enforcement
 
 ---

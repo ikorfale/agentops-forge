@@ -7,9 +7,11 @@ import {
   parseDagStepSpec,
   parseStepSpec,
   receiptCmd,
+  receiptListCmd,
+  receiptVerifyCmd,
   socialCmd,
   workflowCmd
-} from "./chunk-XG44SNQ4.js";
+} from "./chunk-XJFJP6RV.js";
 export {
   dagCmd,
   discoverCmd,
@@ -19,6 +21,8 @@ export {
   parseDagStepSpec,
   parseStepSpec,
   receiptCmd,
+  receiptListCmd,
+  receiptVerifyCmd,
   socialCmd,
   workflowCmd
 };

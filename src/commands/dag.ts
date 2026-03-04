@@ -8,6 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { makeReport } from "../core/report.js";
+import { storeReceipt } from "../core/receipt-store.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -252,6 +253,21 @@ export async function dagCmd(
       if (result.status === "ok") {
         completedOutputs.set(result.stepId, result.output);
         provenanceChain.push(`${result.stepId}:${result.receiptHash.slice(0, 12)}`);
+        // Persist receipt for later verification
+        storeReceipt({
+          receiptHash: result.receiptHash,
+          kind: "dag_step",
+          createdAt: result.finishedAt,
+          label: `dag/${workflowId} step ${result.stepId}: ${result.stepName}`,
+          payload: {
+            workflowId,
+            stepId: result.stepId,
+            stepName: result.stepName,
+            dependsOn: result.dependsOn,
+            input: result.input,
+            output: result.output,
+          },
+        });
       } else {
         failedIds.add(result.stepId);
         errors.push(

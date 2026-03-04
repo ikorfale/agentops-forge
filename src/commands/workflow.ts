@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { makeReport } from "../core/report.js";
+import { storeReceipt } from "../core/receipt-store.js";
 
 export interface WorkflowStep {
   id: string;
@@ -101,6 +102,14 @@ export async function workflowCmd(
 
     if (status === "ok") {
       provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
+      // Persist receipt for later verification
+      storeReceipt({
+        receiptHash: receipt,
+        kind: "step",
+        createdAt: new Date().toISOString(),
+        label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
+        payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output },
+      });
     }
 
     results.push({

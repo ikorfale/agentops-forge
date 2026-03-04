@@ -161,10 +161,103 @@ async function guardCmd(kind) {
 
 // src/commands/receipt.ts
 var import_node_crypto2 = require("crypto");
+
+// src/core/receipt-store.ts
+var import_node_fs2 = require("fs");
+var import_node_os = require("os");
+var import_node_path = require("path");
+var FORGE_DIR = (0, import_node_path.join)((0, import_node_os.homedir)(), ".forge");
+var STORE_PATH = (0, import_node_path.join)(FORGE_DIR, "receipts.jsonl");
+function ensureStore() {
+  if (!(0, import_node_fs2.existsSync)(FORGE_DIR)) {
+    (0, import_node_fs2.mkdirSync)(FORGE_DIR, { recursive: true });
+  }
+}
+function storeReceipt(entry) {
+  ensureStore();
+  (0, import_node_fs2.appendFileSync)(STORE_PATH, JSON.stringify(entry) + "\n", "utf8");
+}
+function lookupReceipt(hash) {
+  if (!(0, import_node_fs2.existsSync)(STORE_PATH)) return null;
+  const lines = (0, import_node_fs2.readFileSync)(STORE_PATH, "utf8").split("\n").filter(Boolean);
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.receiptHash === hash) return entry;
+    } catch {
+    }
+  }
+  return null;
+}
+function listReceipts(limit = 50) {
+  if (!(0, import_node_fs2.existsSync)(STORE_PATH)) return [];
+  const lines = (0, import_node_fs2.readFileSync)(STORE_PATH, "utf8").split("\n").filter(Boolean);
+  return lines.map((l) => {
+    try {
+      return JSON.parse(l);
+    } catch {
+      return null;
+    }
+  }).filter(Boolean).reverse().slice(0, limit);
+}
+function storePath() {
+  return STORE_PATH;
+}
+
+// src/commands/receipt.ts
 async function receiptCmd(intent, outcome) {
   const started = Date.now();
   const receiptHash = (0, import_node_crypto2.createHash)("sha256").update(`${intent}::${outcome}`).digest("hex");
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  storeReceipt({
+    receiptHash,
+    kind: "simple",
+    createdAt: now,
+    label: `${intent} \u2192 ${outcome}`,
+    payload: { intent, outcome }
+  });
   return makeReport("receipt", started, "ok", { intent, outcome, receiptHash });
+}
+async function receiptVerifyCmd(hash) {
+  const started = Date.now();
+  const entry = lookupReceipt(hash);
+  if (!entry) {
+    return makeReport(
+      "receipt:verify",
+      started,
+      "fail",
+      { hash, found: false, storePath: storePath() },
+      [],
+      [`No receipt found for hash ${hash}`]
+    );
+  }
+  return makeReport("receipt:verify", started, "ok", {
+    hash,
+    found: true,
+    receipt: {
+      receiptHash: entry.receiptHash,
+      kind: entry.kind,
+      createdAt: entry.createdAt,
+      label: entry.label,
+      payload: entry.payload,
+      requestId: entry.requestId
+    },
+    storePath: storePath()
+  });
+}
+async function receiptListCmd(limit = 20) {
+  const started = Date.now();
+  const entries = listReceipts(limit);
+  return makeReport("receipt:list", started, "ok", {
+    count: entries.length,
+    receipts: entries.map((e) => ({
+      receiptHash: e.receiptHash,
+      kind: e.kind,
+      createdAt: e.createdAt,
+      label: e.label
+    })),
+    storePath: storePath()
+  });
 }
 
 // src/commands/handoff.ts
@@ -228,6 +321,13 @@ async function workflowCmd(goal, steps, opts = {}) {
     const receipt = status === "ok" ? stepReceipt(step.id, step.name, step.input, output) : "";
     if (status === "ok") {
       provenanceChain.push(`${step.id}:${receipt.slice(0, 12)}`);
+      storeReceipt({
+        receiptHash: receipt,
+        kind: "step",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        label: `workflow/${workflowId} step ${step.id}: ${step.name}`,
+        payload: { workflowId, stepId: step.id, stepName: step.name, input: step.input, output }
+      });
     }
     results.push({
       stepId: step.id,
@@ -431,6 +531,20 @@ async function dagCmd(goal, steps, opts = {}) {
       if (result.status === "ok") {
         completedOutputs.set(result.stepId, result.output);
         provenanceChain.push(`${result.stepId}:${result.receiptHash.slice(0, 12)}`);
+        storeReceipt({
+          receiptHash: result.receiptHash,
+          kind: "dag_step",
+          createdAt: result.finishedAt,
+          label: `dag/${workflowId} step ${result.stepId}: ${result.stepName}`,
+          payload: {
+            workflowId,
+            stepId: result.stepId,
+            stepName: result.stepName,
+            dependsOn: result.dependsOn,
+            input: result.input,
+            output: result.output
+          }
+        });
       } else {
         failedIds.add(result.stepId);
         errors.push(
@@ -495,7 +609,17 @@ program.command("social").requiredOption("--topic <topic>").action(async (opts) 
 program.command("guard").requiredOption("--kind <kind>").action(async (opts) => {
   console.log(JSON.stringify(await guardCmd(opts.kind), null, 2));
 });
-program.command("receipt").requiredOption("--intent <intent>").requiredOption("--outcome <outcome>").action(async (opts) => {
+var receiptGroup = program.command("receipt").description("Create, verify, or list provenance receipts");
+receiptGroup.command("create").description("Create a new provenance receipt and persist it to the store").requiredOption("--intent <intent>", "what was intended").requiredOption("--outcome <outcome>", "what actually happened").action(async (opts) => {
+  console.log(JSON.stringify(await receiptCmd(opts.intent, opts.outcome), null, 2));
+});
+receiptGroup.command("verify <hash>").description("Verify a receipt hash \u2014 look it up in the persistent store").action(async (hash) => {
+  console.log(JSON.stringify(await receiptVerifyCmd(hash), null, 2));
+});
+receiptGroup.command("list").description("List recent receipts from the persistent store").option("-n, --limit <n>", "max receipts to show", "20").action(async (opts) => {
+  console.log(JSON.stringify(await receiptListCmd(Number(opts.limit)), null, 2));
+});
+program.command("receipt-create", { hidden: true }).requiredOption("--intent <intent>").requiredOption("--outcome <outcome>").action(async (opts) => {
   console.log(JSON.stringify(await receiptCmd(opts.intent, opts.outcome), null, 2));
 });
 program.command("handoff").requiredOption("--task <task>").requiredOption("--goal <goal>").action(async (opts) => {
