@@ -90,7 +90,9 @@ async function checkA2A(): Promise<ServiceCheck> {
 
 async function checkAgentMail(): Promise<ServiceCheck> {
   const apiKey = process.env.AGENTMAIL_API_KEY ?? "";
-  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const headers: Record<string, string> = apiKey
+    ? { Authorization: `Bearer ${apiKey}` }
+    : {};
   // HEAD request on the inboxes endpoint — quick auth probe
   const t0 = Date.now();
   try {

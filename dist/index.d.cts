@@ -8,8 +8,8 @@ interface ForgeReport<T = unknown> {
     durationMs: number;
     traceparent?: string;
     data: T;
-    warnings?: string[];
-    errors?: string[];
+    warnings: string[];
+    errors: string[];
 }
 
 declare function discoverCmd(query: string, limit?: number): Promise<ForgeReport<{
@@ -267,4 +267,85 @@ declare function replayCmd(workflowId: string, steps: WorkflowStep[], opts?: Rep
  */
 declare function listCheckpointsSummary(): string;
 
-export { type DagInput, type DagStep, type DagStepResult, type DagWorkflowData, type GuardKind, type ReceiptListData, type ReceiptVerifyData, type ReplayOptions, type StepResult, type WorkflowCheckpoint, type WorkflowData, type WorkflowStep, dagCmd, discoverCmd, guardCmd, handoffCmd, listCheckpoints, listCheckpointsSummary, outreachCmd, parseDagStepSpec, parseStepSpec, receiptCmd, receiptListCmd, receiptVerifyCmd, replayCmd, socialCmd, workflowCmd };
+/**
+ * health.ts — Check the liveness and latency of all key Gerundium services
+ *
+ * Supported targets:
+ *   all       — run all checks
+ *   a2a       — A2A server (Railway)
+ *   agentmail — AgentMail API
+ *   clawk     — Clawk social API
+ *   network   — basic DNS/reachability
+ *
+ * Usage (CLI):
+ *   agentops-forge health --target all
+ *   agentops-forge health --target a2a
+ *
+ * Usage (API):
+ *   import { healthCmd } from "./commands/health.js";
+ *   const report = await healthCmd("all");
+ */
+
+type HealthTarget = "all" | "a2a" | "agentmail" | "clawk" | "network";
+interface ServiceCheck {
+    service: string;
+    url: string;
+    status: "ok" | "degraded" | "down";
+    httpCode?: number;
+    latencyMs: number;
+    detail?: string;
+}
+
+/**
+ * watch.ts — Continuous health monitor with alerting
+ *
+ * Runs recurring health checks at a configurable interval and emits
+ * structured alerts when service status changes (ok → degraded/down
+ * or recovery). Designed for autonomous agent uptime awareness.
+ *
+ * Usage (CLI):
+ *   agentops-forge watch --interval 60 --target all
+ *   agentops-forge watch --interval 30 --target a2a --once
+ *
+ * Usage (API):
+ *   import { watchCmd } from "./commands/watch.js";
+ *   const result = await watchCmd({ target: "all", intervalSec: 60, once: true });
+ */
+
+interface WatchConfig {
+    target: HealthTarget;
+    intervalSec: number;
+    /** Run once and return (non-daemon mode, used by CLI --once flag) */
+    once?: boolean;
+    /** Max number of cycles in daemon mode before self-terminating (safety) */
+    maxCycles?: number;
+    /** Callback invoked on each alert; defaults to console.error */
+    onAlert?: (alert: WatchAlert) => void;
+}
+interface WatchAlert {
+    ts: string;
+    service: string;
+    prevStatus: ServiceCheck["status"] | "unknown";
+    newStatus: ServiceCheck["status"];
+    detail?: string;
+    url: string;
+}
+interface WatchCycleSummary {
+    cycle: number;
+    ts: string;
+    target: HealthTarget;
+    healthy: number;
+    degraded: number;
+    down: number;
+    alerts: WatchAlert[];
+    durationMs: number;
+}
+interface WatchData {
+    target: HealthTarget;
+    intervalSec: number;
+    cycles: WatchCycleSummary[];
+    totalAlerts: number;
+}
+declare function watchCmd(config: WatchConfig): Promise<ReturnType<typeof makeReport<WatchData>>>;
+
+export { type DagInput, type DagStep, type DagStepResult, type DagWorkflowData, type GuardKind, type ReceiptListData, type ReceiptVerifyData, type ReplayOptions, type StepResult, type WatchAlert, type WatchConfig, type WatchCycleSummary, type WatchData, type WorkflowCheckpoint, type WorkflowData, type WorkflowStep, dagCmd, discoverCmd, guardCmd, handoffCmd, listCheckpoints, listCheckpointsSummary, outreachCmd, parseDagStepSpec, parseStepSpec, receiptCmd, receiptListCmd, receiptVerifyCmd, replayCmd, socialCmd, watchCmd, workflowCmd };

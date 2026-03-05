@@ -44,6 +44,7 @@ __export(index_exports, {
   receiptVerifyCmd: () => receiptVerifyCmd,
   replayCmd: () => replayCmd,
   socialCmd: () => socialCmd,
+  watchCmd: () => watchCmd,
   workflowCmd: () => workflowCmd
 });
 module.exports = __toCommonJS(index_exports);
@@ -876,6 +877,214 @@ function listCheckpointsSummary() {
   }
   return lines.join("\n");
 }
+
+// src/commands/health.ts
+var TIMEOUT_MS = 6e3;
+async function probe(service, url, options = {}) {
+  const t0 = Date.now();
+  const expectedStatus = options.expectedStatus ?? 200;
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: options.headers ?? {}
+    });
+    clearTimeout(tid);
+    const latencyMs = Date.now() - t0;
+    const ok = res.status === expectedStatus || res.status >= 200 && res.status < 300;
+    return {
+      service,
+      url,
+      status: ok ? "ok" : "degraded",
+      httpCode: res.status,
+      latencyMs,
+      detail: ok ? void 0 : `unexpected status ${res.status}`
+    };
+  } catch (err) {
+    return {
+      service,
+      url,
+      status: "down",
+      latencyMs: Date.now() - t0,
+      detail: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+async function checkA2A() {
+  return probe(
+    "a2a-server",
+    "https://gerundium-a2a-production.up.railway.app/.well-known/agent.json"
+  );
+}
+async function checkAgentMail() {
+  const apiKey = process.env.AGENTMAIL_API_KEY ?? "";
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const t0 = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const res = await fetch("https://api.agentmail.to/v0/inboxes", {
+      method: "GET",
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", ...headers }
+    });
+    clearTimeout(tid);
+    const latencyMs = Date.now() - t0;
+    const ok = res.status === 200 || res.status === 401;
+    return {
+      service: "agentmail",
+      url: "https://api.agentmail.to/v0/inboxes",
+      status: res.status === 200 ? "ok" : res.status === 401 ? "degraded" : "down",
+      httpCode: res.status,
+      latencyMs,
+      detail: res.status === 200 ? "authenticated" : res.status === 401 ? "reachable (auth check)" : `unexpected ${res.status}`
+    };
+  } catch (err) {
+    return {
+      service: "agentmail",
+      url: "https://api.agentmail.to/v0/inboxes",
+      status: "down",
+      latencyMs: Date.now() - t0,
+      detail: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+async function checkClawk() {
+  return probe("clawk-api", "https://www.clawk.ai/api/v1/agents/me", {
+    headers: {
+      Authorization: `Bearer ${process.env.CLAWK_API_KEY ?? ""}`,
+      "Content-Type": "application/json"
+    }
+  });
+}
+async function checkNetwork() {
+  return probe("network-dns", "https://1.1.1.1/cdn-cgi/trace");
+}
+var CHECK_MAP = {
+  a2a: checkA2A,
+  agentmail: checkAgentMail,
+  clawk: checkClawk,
+  network: checkNetwork
+};
+async function healthCmd(target) {
+  const started = Date.now();
+  const targets = target === "all" ? Object.keys(CHECK_MAP) : [target];
+  const checks = await Promise.all(
+    targets.map((t) => CHECK_MAP[t] ? CHECK_MAP[t]() : Promise.resolve({
+      service: t,
+      url: "<unknown>",
+      status: "down",
+      latencyMs: 0,
+      detail: `Unknown target: ${t}`
+    }))
+  );
+  const healthy = checks.filter((c) => c.status === "ok").length;
+  const degraded = checks.filter((c) => c.status === "degraded").length;
+  const down = checks.filter((c) => c.status === "down").length;
+  const totalLatencyMs = checks.reduce((s, c) => s + c.latencyMs, 0);
+  const status = down > 0 ? healthy > 0 ? "partial" : "fail" : "ok";
+  const errors = checks.filter((c) => c.status === "down").map((c) => `${c.service} is DOWN: ${c.detail ?? "no detail"}`);
+  const warnings = checks.filter((c) => c.status === "degraded").map((c) => `${c.service} is degraded: ${c.detail ?? "no detail"}`);
+  return makeReport(
+    "health",
+    started,
+    status,
+    { target, checks, healthy, degraded, down, totalLatencyMs },
+    warnings,
+    errors
+  );
+}
+
+// src/commands/watch.ts
+function diffStatuses(prev, current) {
+  const alerts = [];
+  for (const check of current) {
+    const prevStatus = prev[check.service] ?? "unknown";
+    if (prevStatus !== check.status) {
+      alerts.push({
+        ts: (/* @__PURE__ */ new Date()).toISOString(),
+        service: check.service,
+        prevStatus,
+        newStatus: check.status,
+        detail: check.detail,
+        url: check.url
+      });
+    }
+  }
+  return alerts;
+}
+async function watchCmd(config) {
+  const started = Date.now();
+  const {
+    target,
+    intervalSec,
+    once = false,
+    maxCycles = 100,
+    onAlert = (a) => console.error(
+      `[watch:alert] ${a.ts} ${a.service} ${a.prevStatus} \u2192 ${a.newStatus}${a.detail ? ` (${a.detail})` : ""}`
+    )
+  } = config;
+  const cycles = [];
+  const prevStatuses = {};
+  let totalAlerts = 0;
+  let cycleNum = 0;
+  const runCycle = async () => {
+    const cycleStart = Date.now();
+    cycleNum++;
+    const healthReport = await healthCmd(target);
+    const checks = healthReport.data.checks;
+    const alerts = diffStatuses(prevStatuses, checks);
+    for (const alert of alerts) {
+      onAlert(alert);
+      totalAlerts++;
+    }
+    for (const check of checks) {
+      prevStatuses[check.service] = check.status;
+    }
+    const summary = {
+      cycle: cycleNum,
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      target,
+      healthy: healthReport.data.healthy,
+      degraded: healthReport.data.degraded,
+      down: healthReport.data.down,
+      alerts,
+      durationMs: Date.now() - cycleStart
+    };
+    cycles.push(summary);
+  };
+  if (once) {
+    await runCycle();
+  } else {
+    const intervalMs = intervalSec * 1e3;
+    let running = true;
+    const stop = () => {
+      running = false;
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    while (running && cycleNum < maxCycles) {
+      await runCycle();
+      if (!running || cycleNum >= maxCycles) break;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+  const hasProblems = cycles.some((c) => c.down > 0);
+  const status = hasProblems ? "partial" : "ok";
+  const errors = cycles.flatMap((c) => c.alerts).filter((a) => a.newStatus === "down").map((a) => `${a.service} went DOWN at ${a.ts}: ${a.detail ?? "no detail"}`);
+  const warnings = cycles.flatMap((c) => c.alerts).filter((a) => a.newStatus === "degraded").map((a) => `${a.service} degraded at ${a.ts}: ${a.detail ?? "no detail"}`);
+  return makeReport(
+    "watch",
+    started,
+    status,
+    { target, intervalSec, cycles, totalAlerts },
+    warnings,
+    errors
+  );
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   dagCmd,
@@ -892,5 +1101,6 @@ function listCheckpointsSummary() {
   receiptVerifyCmd,
   replayCmd,
   socialCmd,
+  watchCmd,
   workflowCmd
 });

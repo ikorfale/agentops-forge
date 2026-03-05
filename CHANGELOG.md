@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.6.0] — 2026-03-05
+
+### Added
+- **`watch` command** — continuous health monitor with alert diffing
+  - Runs recurring `healthCmd` cycles at a configurable interval (`intervalSec`)
+  - Emits `WatchAlert` when any service status changes (ok/degraded/down, incl. recovery)
+  - `--once` / `once: true` flag for single-shot mode (used by CI and cron)
+  - `maxCycles` safety cap to prevent unbounded daemon loops
+  - Pluggable `onAlert` callback; defaults to `console.error`
+  - Returns full `WatchData` with cycle-by-cycle summaries and `totalAlerts` counter
+  - 4 new unit tests covering ok, down alert, degraded warning, and metadata structure
+
+### Fixed
+- **TypeScript errors** — `ForgeReport.errors` and `ForgeReport.warnings` are now required
+  (`string[]` instead of `string[] | undefined`), matching `makeReport` defaults and
+  eliminating TS2769 / TS18048 errors in health.ts and test files
+- **`health.ts` header type** — `headers` local variable now typed as `Record<string, string>`
+  to resolve `HeadersInit` assignability error (TS2769)
+
+---
+
 ## [0.5.0] — 2026-03-05
 
 ### Added

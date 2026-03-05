@@ -9,6 +9,6 @@ export interface ForgeReport<T = unknown> {
   durationMs: number;
   traceparent?: string;
   data: T;
-  warnings?: string[];
-  errors?: string[];
+  warnings: string[];
+  errors: string[];
 }
