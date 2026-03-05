@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.7.0] — 2026-03-05
+
+### Added
+- **`lint` command** — workflow/DAG definition linter (pre-execution validation)
+  - **E001** Empty workflow (zero steps)
+  - **E002** Oversized workflow (exceeds `errorSteps` policy, default 50)
+  - **E003** Step missing required `id` field
+  - **E004** Duplicate step IDs
+  - **E005** Missing `rollbackCmd` when `requireRollback` policy is enabled
+  - **E006** Dependency references a non-existent step ID
+  - **E007** Circular dependency (cycle detection via DFS)
+  - **W001** Large workflow (exceeds `warnSteps` policy, default 20)
+  - **W002** Step missing `name` field
+  - **W003** Step missing `rollbackCmd` (multi-step workflows)
+  - **W004** Unreachable step (no path from any DAG root)
+  - Returns `LintData` with `status` (pass/warn/fail), violation list, error/warning counts
+  - `lintCmd` wraps in standard `ForgeReport` for CLI/API compatibility
+  - 13 unit tests covering all error codes and edge cases
+
+### Stats
+- 68/68 tests passing (+13 from lint suite)
+- 11 commands total
+
+---
+
 ## [0.6.0] — 2026-03-05
 
 ### Added
