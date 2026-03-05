@@ -10,6 +10,7 @@ import { workflowCmd, parseStepSpec } from "./commands/workflow.js";
 import { dagCmd, parseDagStepSpec } from "./commands/dag.js";
 import { healthCmd, type HealthTarget } from "./commands/health.js";
 import { replayCmd, listCheckpointsSummary } from "./commands/replay.js";
+import { lintCmd, type LintStep } from "./commands/lint.js";
 
 const program = new Command();
 program.name("agentops-forge").description("Professional toolkit for autonomous agent operations").version("0.1.0");
@@ -150,6 +151,41 @@ replayGroup
   .description("List all saved checkpoints (workflows that failed and can be replayed)")
   .action(() => {
     console.log(listCheckpointsSummary());
+  });
+
+// ─── lint ─────────────────────────────────────────────────────────────────────
+program
+  .command("lint")
+  .description("Validate a workflow or DAG definition before execution")
+  .requiredOption("--steps <steps>", "Comma-separated step specs: id[:name][:dep1+dep2][:rollback]")
+  .option("--goal <goal>", "Workflow goal/name for reporting", "unnamed")
+  .option("--require-rollback", "Error if any step lacks a rollbackCmd", false)
+  .option("--warn-steps <n>", "Warn threshold for step count", "20")
+  .option("--error-steps <n>", "Error threshold for step count", "50")
+  .action((opts) => {
+    const steps: LintStep[] = String(opts.steps)
+      .split(",")
+      .map((spec: string) => {
+        const [id, name, deps, rollback] = spec.trim().split(":");
+        return {
+          id: id ?? "",
+          name: name ?? id ?? "",
+          dependsOn: deps ? deps.split("+").filter(Boolean) : [],
+          ...(rollback ? { rollbackCmd: rollback } : {}),
+        };
+      })
+      .filter((s: LintStep) => s.id);
+    const result = lintCmd({
+      goal: opts.goal,
+      steps,
+      policy: {
+        requireRollback: opts.requireRollback,
+        warnSteps: Number(opts.warnSteps),
+        errorSteps: Number(opts.errorSteps),
+      },
+    });
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.status === "fail" ? 1 : 0);
   });
 
 program.parse();
